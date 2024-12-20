@@ -1,111 +1,101 @@
-import numpy as np
 import time
+import matplotlib.pyplot as plt
+import numpy as np
 from numba import cuda
-import math
-from matplotlib import pyplot as plt
+from tabulate import tabulate
 
-matrix_size = 100
+# Количество потоков в блоке (Thread Per Block) для GPU
+TPB = 16
 
-# Инициализация матриц для CPU
-cpu_matrix1 = np.random.randint(0, 10, (matrix_size, matrix_size))
-cpu_matrix2 = np.random.randint(0, 10, (matrix_size, matrix_size))
-cpu_matrix_res = np.zeros((matrix_size, matrix_size), dtype=int)
+# Количество итераций для усреднения времени выполнения
+ITER = 70
 
-# Инициализация матриц для GPU
-gpu_matrix1 = cuda.to_device(cpu_matrix1)
-gpu_matrix2 = cuda.to_device(cpu_matrix2)
-gpu_matrix_res = cuda.device_array((len(cpu_matrix1), len(cpu_matrix2)))
+# Небольшая константа для избежания деления на ноль
+EPS = 10e-8
 
-# Функция матричного умножения на CPU
-def cpu_mat_mul(A, B, C):
-    for i in range(matrix_size):
-        for j in range(matrix_size):
-            res = 0
-            for k in range(matrix_size):
-                res += A[i, k] * B[k, j]
-            C[i, j] = res
-
-def cpu_calc():
-    print("CPU начинает работу.")
-    start_time = time.time()
-    cpu_mat_mul(cpu_matrix1, cpu_matrix2, cpu_matrix_res)
-    cpu_time = time.time() - start_time
-    print(f"{cpu_time} секунд - время вычисления на CPU")
-    return cpu_time
-
+# Декоратор, указывающий, что функция будет выполняться на GPU с использованием Numba
 @cuda.jit
-def gpu_mat_mul(A, B, C):
-    for i in range(matrix_size):
-        for j in range(matrix_size):
-            rez = 0
-            for z in range(matrix_size):
-                rez += A[i, z] * B[z, j]
-            C[i, j] = rez
+def gpu_vec_sum(vec, res):
+    tx = cuda.threadIdx.x  # Индекс потока в блоке
+    bx = cuda.blockIdx.x   # Индекс блока
+    idx = tx + bx * TPB    # Индекс элемента в массиве
 
-def gpu_calc():
-    # Параметры ядра
-    threadsperblock = (32, 32)
-    blockspergrid_x = int(math.ceil(cpu_matrix1.shape[0] / threadsperblock[0]))
-    blockspergrid_y = int(math.ceil(cpu_matrix2.shape[1] / threadsperblock[1]))
-    blockspergrid = (blockspergrid_x, blockspergrid_y)
-    print(f"Размер сетки = {blockspergrid}, {threadsperblock}")
-    print("Конец работы CPU!\n")
+    if idx < vec.shape[0]:
+        cuda.atomic.add(res, 0, vec[idx])
 
-    print("GPU начинает свою работу...")
-    start_time = time.time()
-    gpu_mat_mul[blockspergrid, threadsperblock](gpu_matrix1, gpu_matrix2, gpu_matrix_res)
-    gpu_time = time.time() - start_time
-    print(f"{gpu_time} секунд - время вычисления на GPU")
-    print("Конец работы GPU!\n")
-    return gpu_time
+# Функция для проведения измерений на CPU и GPU
+def calculation():
+    rows = []
+    vec_size_min = 50000
+    vec_size_max = 1000000
+    vec_size_interval = 50000
 
-if __name__ == "__main__":
-    # Открываем файл для записи результатов
-    with open("results.txt", "w") as f:
-        cpu_time = cpu_calc()
-        f.write(f"Время вычисления на CPU: {cpu_time} секунд\n")
-        
-        gpu_time = gpu_calc()
-        f.write(f"Время вычисления на GPU: {gpu_time} секунд\n")
-        
-        # Записываем параметры сетки
-        threadsperblock = (32, 32)
-        blockspergrid_x = int(math.ceil(cpu_matrix1.shape[0] / threadsperblock[0]))
-        blockspergrid_y = int(math.ceil(cpu_matrix2.shape[1] / threadsperblock[1]))
-        blockspergrid = (blockspergrid_x, blockspergrid_y)
-        f.write(f"Размер сетки = {blockspergrid}, {threadsperblock}\n")
+    for vec_size in range(vec_size_min, vec_size_max + 1, vec_size_interval):
+        cpu_time_sum = 0.
+        gpu_time_sum = 0.
 
-    # Данные для графиков
-    x = [0.20007705688476562, 1.621795415878296, 13.972699165344238, 105.11987590789795, 956.7778902053833,
-         1989.2391361369629]
-    y = [0.15534392356872559, 0.16351268768310547, 0.1880006504058838, 0.2145817470550537, 0.25744752883911133,
-         0.2705642986297607]
-    z = [100, 200, 400, 800, 1600, 2000]
+        for _ in range(ITER):
+            vec = np.ones(vec_size)
+            res = np.zeros(1, dtype=np.int32)
 
-    # Создание субплотов
-    fig, axs = plt.subplots(3, 1, figsize=(10, 15))
+            d_vec = cuda.to_device(vec)  # Отправляем вектор на GPU
+            d_res = cuda.to_device(res)  # Создаем массив для результата на GPU
 
-    # График времени работы CPU
-    axs[0].plot(x, z)
-    axs[0].set_title("Время работы CPU")
-    axs[0].set_xlabel("Размер блоков")
-    axs[ 0].set_ylabel("Время работы в секундах")
-    axs[0].grid()
+            start = time.time()
 
-    # График времени работы GPU
-    axs[1].plot(z, y)
-    axs[1].set_title("Время работы GPU")
-    axs[1].set_xlabel("Размер блоков")
-    axs[1].set_ylabel("Время работы в секундах")
-    axs[1].grid()
+            # Вызываем функцию на GPU для суммирования
+            gpu_vec_sum[int((vec_size + TPB) / TPB), TPB](d_vec, d_res)
 
-    # График ускорения
-    vsp = [x[i] / y[i] for i in range(len(x))]
-    axs[2].plot(z, vsp)
-    axs[2].set_title("Ускорение")
-    axs[2].set_xlabel("Размер блоков")
-    axs[2].grid()
+            gpu_time_sum += time.time() - start
 
-    plt.tight_layout()
-    plt.savefig("performance_graphs.png")  # Сохранение графиков в файл
-    plt.close()  # Закрываем график после сохранения
+            res = d_res.copy_to_host()  # Копируем результат с GPU на CPU
+
+            start = time.time()
+            real_res = np.sum(vec)  # Выполняем суммирование на CPU
+            cpu_time = time.time() - start
+            cpu_time_sum += cpu_time
+
+        row = [vec_size,  cpu_time_sum / ITER, gpu_time_sum / ITER]
+        rows.append(row)
+
+    # Выводим результаты в виде таблицы
+    print(tabulate(rows, headers=['vector size', 'cpu, ms', 'gpu, ms']))
+    return rows
+
+# Функция для построения графиков
+def plots(vec_array, cpu_time_array, gpu_time_array, acceleration_array):
+    # График времени работы программы на CPU
+    plt.figure()
+    plt.title("CPU")
+    plt.plot(vec_array, cpu_time_array)
+    plt.xlabel("размер вектора")
+    plt.ylabel("время, мс")
+    plt.grid()
+
+    # График времени работы программы на GPU
+    plt.figure()
+    plt.title("GPU")
+    plt.plot(vec_array, gpu_time_array)
+    plt.xlabel("размер вектора")
+    plt.ylabel("время, мс")
+    plt.grid()
+
+    # График ускорения вычислений на GPU относительно CPU
+    plt.figure()
+    plt.title("Ускорение")
+    plt.plot(vec_array, acceleration_array)
+    plt.xlabel("размер вектора")
+    plt.grid()
+    plt.show()
+
+# Выполняем измерения и сохраняем результаты
+output_data = calculation()
+
+# Данные для построения графиков
+vec_array = list(map(lambda x: x[0], output_data))
+cpu_time_array = list(map(lambda x: x[1], output_data))
+gpu_time_array = list(map(lambda x: x[2], output_data))
+acceleration_array = list(map(lambda x: x[1] / (x[2] if x[2] > EPS else EPS), output_data))
+
+# Строим графики
+plots(vec_array, cpu_time_array, gpu_time_array, acceleration_array)
