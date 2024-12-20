@@ -6,7 +6,5 @@ CPU начинает работу.
 Конец работы CPU!
 
 GPU начинает свою работу...
-C:\Users\Petr\AppData\Local\Programs\Python\Python312\Lib\site-packages\numba\cuda\dispatcher.py:536: NumbaPerformanceWarning: Grid size 16 will likely result in GPU under-utilization due to low occupancy.
-  warn(NumbaPerformanceWarning(msg))
 0.7133631706237793 секунд - время вычисления на GPU
 Конец работы GPU!
