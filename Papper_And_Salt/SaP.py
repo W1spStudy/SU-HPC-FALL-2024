@@ -1,12 +1,11 @@
+from numba import cuda
 import numpy as np
 import cv2
-from numba import cuda
-import numba
 import time
-import os
+import math
 
-# Функция для добавления шума "соль и перец"
 def add_salt_and_pepper_noise(image, salt_prob, pepper_prob):
+    """Добавляет шум соли и перца к изображению."""
     noisy_image = np.copy(image)
     total_pixels = image.size
 
@@ -22,90 +21,102 @@ def add_salt_and_pepper_noise(image, salt_prob, pepper_prob):
 
     return noisy_image
 
-# CUDA ядро для медианного фильтра с 9 точками
 @cuda.jit
-def median_filter_kernel(input_image, output_image, width, height):
-    # Определяем текстурную память
-    tex = cuda.texture.Array(input_image.shape[0], input_image.shape[1], numba.cuda.dtype.uint8)
-
-    # Получаем позицию потока
+def mf_kernel(input_image, output_image, width, height):
+    """CUDA ядро для медианного фильтра 9-точек."""
+    # Определяем позицию потока в сетке
     x, y = cuda.grid(2)
 
-    # Проверяем границы
-    if x < width and y < height:
-        # Создаем окно для медианного фильтра
-        window = []
-        for dy in range(-1, 2):
-            for dx in range(-1, 2):
-                ix = min(max(x + dx, 0), width - 1)  # Ограничиваем индекс по x
-                iy = min(max(y + dy, 0), height - 1)  # Ограничиваем индекс по y
-                window.append(cuda.texture.read(tex, (ix, iy)))  # Читаем значение из текстуры
+    if x < 1 or y < 1 or x >= width - 1 or y >= height - 1:
+        # Пропускаем граничные пиксели (нельзя применить 3x3 фильтр)
+        return
 
-        # Сортируем окно, чтобы найти медиану
-        window.sort()
-        output_image[y, x] = window[4]  # Медиана - это 5-й элемент
+    # Создаем список для хранения 9 пикселей из области 3x3
+    window = cuda.local.array(9, dtype=np.float32)
 
-def apply_median_filter(input_image):
+    idx = 0
+    for j in range(-1, 2):
+        for i in range(-1, 2):
+            window[idx] = input_image[y + j, x + i]
+            idx += 1
+
+    # Сортировка пузырьком для нахождения медианы
+    for i in range(9):
+        for j in range(i + 1, 9):
+            if window[i] > window[j]:
+                temp = window[i]
+                window[i] = window[j]
+                window[j] = temp
+
+    # Присваиваем медианное значение выходному изображению
+    output_image[y, x] = window[4]
+
+def mf_gpu(input_image):
+    """Применяет медианный фильтр 9-точек с использованием CUDA."""
+    # Преобразуем входное изображение в float32 для совместимости
+    input_image = input_image.astype(np.float32)
+
     # Получаем размеры изображения
     height, width = input_image.shape
 
     # Выделяем память для выходного изображения
-    output_image = np.zeros_like(input_image)
+    output_image = np.zeros((height, width))
 
-    # Копируем входное изображение на устройство
-    input_image_device = cuda.to_device(input_image)
-    output_image_device = cuda.to_device(output_image)
+    # Копируем данные на устройство
+    cuda_input = cuda.to_device(input_image)
+    cuda_output = cuda.to_device(output_image)
 
-    # Определяем размеры блоков и сетки
-    block_size = (16, 16)
-    grid_size = (int(np.ceil(width / block_size[0])), int(np.ceil(height / block_size[1])))
-
-    # Запускаем таймер
-    start_time = time.time()
+    # Определяем размеры блока и сетки
+    threads_per_block = (16, 16)
+    blocks_per_grid_x = math.ceil(width / threads_per_block[0])
+    blocks_per_grid_y = math.ceil(height / threads_per_block[1])
+    blocks_per_grid = (blocks_per_grid_x, blocks_per_grid_y)
 
     # Запускаем ядро
-    median_filter_kernel[grid_size, block_size](input_image_device, output_image_device, width, height)
+    mf_kernel[blocks_per_grid, threads_per_block](cuda_input, cuda_output, width, height)
 
-    # Копируем выходное изображение обратно на хост
-    output_image_device.copy_to_host(output_image)
+    # Копируем результат обратно на хост
+    output_image = cuda_output.copy_to_host()
 
-    # Вычисляем время обработки
-    processing_time = time.time() - start_time
+    return output_image
 
-    return output_image, processing_time
+def save_image(image, filename):
+    """Сохраняет изображение в файл."""
+    # Преобразуем изображение в формат uint8
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    cv2.imwrite(filename, image)
 
-def main():
-    # Запрашиваем у пользователя путь к входному изображению
-    input_image_path = input("Введите путь к входному изображению: ")
+# Запрос пути к файлу у пользователя
+file_path = input("путь к изображению: ")
 
-    # Загружаем входное изображение
-    input_image = cv2.imread(input_image_path, cv2.IMREAD_GRAYSCALE)
+# Запрос у пользователя, хочет ли он зашумить изображение
+choice = input("Введите 1 для зашумления изображения или 0 для выбора зашумленного файла: ")
 
-    # Проверяем, было ли загружено изображение
-    if input_image is None:
-        print("Ошибка: Не удалось загрузить изображение.")
-        return
+if choice == '1':
+    # Загружаем изображение
+    src_image = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
 
-    # Добавляем шум "соль и перец"
-    noisy_image = add_salt_and_pepper_noise(input_image, salt_prob=0.02, pepper_prob=0.02)
+    # Проверка на успешную загрузку изображения
+    if src_image is None:
+        print(f"Ошибка: Не удалось загрузить изображение из файла '{file_path}'. Проверьте путь и формат файла.")
+    else:
+        # Добавляем шум
+        noisy_image = add_salt_and_pepper_noise(src_image, salt_prob=0.05, pepper_prob=0.05)
+        
+        # Сохраняем зашумленное изображение
+        save_image(noisy_image, 'noisy_image.bmp')
 
-    # Сохраняем зашумленное изображение
-    noisy_image_path = os.path.splitext(input_image_path)[0] + "_noised.bmp"
-    cv2.imwrite(noisy_image_path, noisy_image)
-    print(f"Зашумленное изображение сохранено по пути: {noisy_image_path}")
+elif choice == '0':
+    # Загружаем зашумленное изображение
+    noisy_image = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
+    # Применяем медианный фильтр
+    start_gpu = time.time()
+    filtered_image = mf_gpu(noisy_image)
+    time_gpu = time.time() - start_gpu
 
-    # Применяем медианный фильтр к зашумленному изображению
-    output_image, processing_time = apply_median_filter(noisy_image)
+    # Сохраняем результирующее изображение
+    save_image(filtered_image, 'filtered_image.bmp')
 
-    # Определяем путь для выходного изображения
-    output_image_path = os.path.join(os.path.dirname (input_image_path), "output_image.bmp")
-
-    # Сохраняем выходное изображение
-    cv2.imwrite(output_image_path, output_image)
-
-    # Выводим время обработки
-    print(f"Время обработки: {processing_time:.4f} секунд")
-    print(f"Выходное изображение сохранено по пути: {output_image_path}")
-
-if __name__ == "__main__":
-    main()
+    # Время
+    print("Время (GPU): ", time_gpu)
+    print("Отфильтрованное изображение сохранено как 'filtered_image.bmp'.")
